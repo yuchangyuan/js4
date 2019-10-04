@@ -1,0 +1,6 @@
+.ghc*
+/dist
+/dist-newstyle
+*o
+*hi
+/result
