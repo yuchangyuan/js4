@@ -162,7 +162,7 @@ mqttStart localPeer = do
   console <- jsg "console"
   paho <- jsg "Paho"
   client <- new (paho ^. js "MQTT" ^. js "Client")
-                ("test.mosquitto.org", 8080 :: Int, "/", "client" ++ localPeer)
+                ("test.mosquitto.org", 8081 :: Int, "/", "client" ++ localPeer)
   client ^. jss "onMessageArrived" (fun $ \ _ _ [e] -> do
             payload <- strToText <$> (e ^. js "payloadString" >>= valToStr)
             topic <- strToText <$> (e ^. js "topic" >>= valToStr)
@@ -186,7 +186,9 @@ mqttStart localPeer = do
 
          return ())
 
-  client ^. js0 "connect" -- cb
+  opts <- obj
+  opts ^. jss "useSSL" True
+  client ^. js1 "connect" opts
 
 
   window <- jsg "window"
