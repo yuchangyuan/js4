@@ -11,7 +11,9 @@ let
   hpkgs = pkgs.haskell.packages.${compiler}.override {
     overrides = (import ./nix/overrides.nix) pkgs;
   };
+
+  hpkgs' = if pkgs.lib.inNixShell then pkgs.haskellPackages else hpkgs;
 in {
-  js4 = hpkgs.callPackage ./default.nix { };
+  js4 = hpkgs'.callPackage ./default.nix { };
 }
 

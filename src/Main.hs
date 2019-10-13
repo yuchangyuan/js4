@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# Language TypeFamilies #-}
 
 module Main where
 
@@ -45,6 +46,8 @@ import Control.Monad.IO.Class (liftIO, MonadIO(..))
 import qualified Data.Text as T
 
 import System.IO (hFlush, stdout)
+import qualified Data.Map as M
+
        {-
 
 import Reflex.Class
@@ -60,6 +63,7 @@ import Control.Monad.Fix (MonadFix)
 
 import Control.Lens
 
+import RTC (peerConnect, mqttStart, rtcInit)
 {-
 1. update mouse position
 2. click count
@@ -108,8 +112,10 @@ clickEv = do
    liftIO $ DOM.on doc DOM.click $ liftIO $ trig ()
    return ev
 
+
 app
   :: ( DomBuilder t m
+     , DomBuilderSpace m ~ GhcjsDomSpace
      , MonadHold t m
      , PerformEvent t m
      , TriggerEvent t m
@@ -119,12 +125,34 @@ app
      , DOM.MonadJSM m
      , PerformEvent t m
      , MonadIO (Performable m)
+     , MonadSample t (Performable m)
      ) => m ()
 app = do
     loc1 <- getLocationPath
     loc2 <- getLocationAfterHost
     el "p" $ text loc1
     el "p" $ text loc2
+
+    lidTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
+    lidBtn <- button "start"
+
+    el "p" $ text "--"
+
+    performEvent_ $ ffor lidBtn $ \c -> do
+        let t = _textInput_value lidTxt
+        lid <- sample $ current t
+        DOM.liftJSM $ mqttStart (T.unpack lid)
+
+    ridTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
+    ridBtn <- button "connect peer"
+
+    performEvent_ $ ffor ridBtn $ \c -> do
+        let t = _textInput_value ridTxt
+        rid <- sample $ current t
+        let t1 = _textInput_value lidTxt
+        lid <- sample $ current t1
+        DOM.liftJSM $ peerConnect (T.unpack lid) (T.unpack rid) Nothing
+        return ()
 
     -- mouse location
     mEv <- mouseMoveEv
@@ -152,4 +180,6 @@ app = do
     el "p" $ dynText $ ffor secCnt $ ("elapse: " <>) . T.pack . show
 
 main :: IO ()
-main = mainWidget app
+main = mainWidget $ do
+   DOM.liftJSM rtcInit
+   app
