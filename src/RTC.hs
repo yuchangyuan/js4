@@ -1,6 +1,10 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables, FlexibleContexts #-}
 
-module RTC where
+module RTC ( peerConnect
+           , MqttWidget(..)
+           , mqttWidget
+           , MqttState(..)
+           , rtcInit ) where
 
 import qualified GHCJS.DOM as DOM
 import qualified GHCJS.DOM.Types as DOM
@@ -42,9 +46,15 @@ import Control.Monad (when, unless, forM_)
 import Data.List (stripPrefix, findIndex)
 import qualified Data.Map as M
 
+import Control.Monad.IO.Class (liftIO, MonadIO(..))
+
 import qualified Data.Text as T
 import Data.Text (Text(..))
 import Data.Maybe (isJust)
+
+import Reflex
+import Reflex.Dom.Core
+import Control.Monad.Fix (MonadFix)
 
 cfg :: JSM JSVal
 cfg = do
@@ -156,6 +166,7 @@ procSignalCandidate peer cand = do
   cand' <- jsg "JSON" ^. js1 "parse" cand
   DOM.addIceCandidate pc (DOM.RTCIceCandidate cand')
 
+{-
 mqttStart :: String -> JSM ()
 mqttStart localPeer = do
   consoleLog ("local_peer: ", localPeer)
@@ -195,6 +206,87 @@ mqttStart localPeer = do
   window ^.jss "_mqtt_client" client
 
   return ()
+-}
+
+mqttProc :: (MqttState -> IO ()) -> (SignalData -> IO ()) ->
+             String -> JSM JSVal
+mqttProc stT msgT localPeer = do
+  liftIO $ stT MqttConnecting
+
+  consoleLog ("local_peer: ", localPeer)
+  console <- jsg "console"
+  paho <- jsg "Paho"
+  client <- new (paho ^. js "MQTT" ^. js "Client")
+                ("test.mosquitto.org", 8081 :: Int, "/", "client" ++ localPeer)
+  client ^. jss "onMessageArrived" (fun $ \ _ _ [e] -> do
+            payload <- strToText <$> (e ^. js "payloadString" >>= valToStr)
+            topic <- strToText <$> (e ^. js "topic" >>= valToStr)
+            case parseTopic (topicPrefix ++ "/") (T.unpack topic) of
+                 Just (lid, rid, op) -> do
+                      let dat = SignalData lid rid op payload
+                      consoleLog (lid, rid, op, payload)
+                      liftIO $ msgT dat
+                 Nothing -> return ()
+            )
+
+  client ^. jss "onConnected" (fun $ \_ _ [rc, uri] -> do
+      console ^. js1 "log" ("connected:", uri)
+      client ^. js1 "subscribe" (topicPrefix ++ "/" ++ localPeer ++ "/#")
+      liftIO $ stT MqttReady
+      return ())
+
+  opts <- obj
+  opts ^. jss "useSSL" True
+
+  client ^. jss "onConnectionLost" (fun $ \_ _ [ec, em] -> do
+         liftIO $ stT MqttConnecting
+         console ^. js1 "log" ("lost connection", ec, em)
+
+         liftIO $ threadDelay $ 2000 * 1000
+         console ^. js1 "log" "reconnect"
+         client ^. js1 "connect" opts
+         return ())
+
+  client ^. js1 "connect" opts
+
+  -- for debug
+  jsg "window" ^.jss "_mqtt_client" client
+
+  return client
+
+
+data MqttState = MqttReady | MqttConnecting | MqttClosed deriving (Show, Eq)
+
+data MqttWidget t = MqttWidget { _mqtt_state :: Dynamic t MqttState
+                               , _mqtt_message :: Event t SignalData
+                               }
+
+mqttWidget :: ( Reflex t
+              , MonadSample t m
+              , DOM.MonadJSM m
+              , MonadHold t m
+              , PerformEvent t m
+              , TriggerEvent t m
+              , MonadIO (Performable m)
+              ) =>
+              Event t Text -> -- local peer id
+              Event t SignalData -> -- send signal data
+              m (MqttWidget t)
+
+mqttWidget peer reqE = do
+    peerE <- headE $ T.unpack <$> peer
+    (msgE, msgT) <- newTriggerEvent
+    (stE, stT) <- newTriggerEvent
+    stDyn <- holdDyn MqttClosed stE
+
+    mqttClientE <- performEvent $ ffor peerE $
+                \p -> Just <$> DOM.liftJSM (mqttProc stT msgT p)
+    mqttClientB <- hold Nothing mqttClientE
+
+    -- use stDyn & mqttClientB to gate reqE
+    --
+
+    return $ MqttWidget stDyn msgE
 
 initDataChannel :: String -> DOM.RTCDataChannel -> JSM ()
 initDataChannel remotePeer dc = do

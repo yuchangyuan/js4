@@ -4,6 +4,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# Language TypeFamilies #-}
+{-# Language RecursiveDo  #-}
 
 module Main where
 
@@ -63,7 +64,7 @@ import Control.Monad.Fix (MonadFix)
 
 import Control.Lens
 
-import RTC (peerConnect, mqttStart, rtcInit)
+import RTC
 {-
 1. update mouse position
 2. click count
@@ -133,20 +134,38 @@ app = do
     el "p" $ text loc1
     el "p" $ text loc2
 
-    lidTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
-    lidBtn <- button "start"
+    rec lidTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
+        --lidBtn <- button "start"
 
-    el "p" $ text "--"
+        let lidBtnAttr = zipDynWith (\a b -> if (a /= T.empty) && (b == MqttClosed)
+                                             then M.empty
+                                             else "disabled" =: "disabled")
+                                   (_textInput_value lidTxt)
+                                   (_mqtt_state mqtt)
 
-    performEvent_ $ ffor lidBtn $ \c -> do
-        let t = _textInput_value lidTxt
-        lid <- sample $ current t
-        DOM.liftJSM $ mqttStart (T.unpack lid)
+        (lidBtn, _) <- elDynAttr' "button" lidBtnAttr (text "set local peer")
+
+        el "br" blank
+        display $ _mqtt_state mqtt
+        el "p" $ text "--"
+
+        mqtt <- mqttWidget (tag (current $ _textInput_value lidTxt)
+                                (domEvent Click lidBtn))
+                           never
+
 
     ridTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
-    ridBtn <- button "connect peer"
 
-    performEvent_ $ ffor ridBtn $ \c -> do
+    let ridBtnAttr = zipDynWith (\a b ->  if (a /= T.empty) && (b == MqttReady)
+                                          then M.empty
+                                          else "disabled" =: "disabled")
+                                (_textInput_value ridTxt)
+                                (_mqtt_state mqtt)
+
+
+    (ridBtn, _) <- elDynAttr' "button" ridBtnAttr $ text "connect peer"
+
+    performEvent_ $ ffor (domEvent Click ridBtn) $ \c -> do
         let t = _textInput_value ridTxt
         rid <- sample $ current t
         let t1 = _textInput_value lidTxt
