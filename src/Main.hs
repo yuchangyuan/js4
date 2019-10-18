@@ -264,6 +264,7 @@ app
      , MonadSample t (Performable m)
      ) => m ()
 app = do
+
     rtcWidget
     -- mouse location
     el "hr" blank
@@ -280,6 +281,9 @@ app = do
     secCnt <- foldDyn (const (+ 1)) 0 sec1s
 
     dynText $ ffor secCnt $ ("elapse: " <>) . T.pack . show
+    text " "
+    elAttr "a" ("href" =: "https://github.com/yuchangyuan/js4") $
+           text "[source]"
 
 main :: IO ()
 main = mainWidget $ do
