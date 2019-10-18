@@ -22,7 +22,7 @@ import Language.Javascript.JSaddle( askJSM
                                   , val, fun
                                   , js, jss, jsf
                                   , js0, js1, js2, jsg
-                                  , valToNumber
+                                  , valToNumber, valToText
                                   )
 import Control.Lens ((^.))
 
@@ -66,7 +66,15 @@ import Control.Monad.Fix (MonadFix)
 
 import Control.Lens
 import Control.Monad.Catch (MonadCatch, catch) -- JSM is MonadCatch
+
 import RTC
+
+{-
+import Data.ByteString.Lazy (toStrict)
+import Data.Text.Encoding (decodeUtf8)
+import Data.Aeson (encode)
+-}
+
 {-
 1. update mouse position
 2. click count
@@ -178,7 +186,7 @@ rtcWidget = mdo
   let state_dyn = join $ _rtc_peer_state <$> rtcManager_d
 
   -- Map Text Text
-  msgTA <- el "div" $ do el "p" $ text "send message: "
+  msgTA <- el "div" $ do el "p" $ text "message content: "
                          textArea $ TextAreaConfig "" never
                                                    (constDyn $ ("cols" =: "60") <>
                                                                ("rows" =: "10"))
@@ -187,6 +195,19 @@ rtcWidget = mdo
 
   rxMsg_e <- switchHold never $ updated $ _rtc_rx_msg <$> rtcManager_d
   performEvent_ $ ffor rxMsg_e $ \m -> DOM.liftJSM $ consoleLog m
+
+  elAttr "p" ("style" =: "color:blue;") $ text "received message (latest first)"
+
+  -- Dynamic t [(Text, Text)]
+  rxMsg_dyn <- foldDyn (:) [] rxMsg_e
+
+  let rxMsg_w1 =  ffor rxMsg_dyn $ \l -> mapM_ (\(a, b) -> el "li" $ do
+                    elAttr "span" ("style" =: "color:red") $ text a
+                    text " "
+                    m <- DOM.liftJSM $ valToText b
+                    text m) l
+  -- dyn :: Dynamic t (m a)
+  el "ul" $ dyn_ rxMsg_w1
 
   return ()
 
@@ -243,45 +264,22 @@ app
      , MonadSample t (Performable m)
      ) => m ()
 app = do
-    loc1 <- getLocationPath
-    loc2 <- getLocationAfterHost
-    el "p" $ text loc1
-    el "p" $ text loc2
-
     rtcWidget
-        -- mouse location
+    -- mouse location
+    el "hr" blank
+
     mEv <- mouseMoveEv
     dynMousePos <- holdDyn "mouse pos: " $ ffor mEv $ ("mouse pos: " <>) . T.pack . show
-    el "p" $ dynText dynMousePos
+    dynText dynMousePos
 
-    -- click cnt
-    cEv <- clickEv
-    cnt <- foldDyn (const (+ 1)) 0 cEv
-
-    el "p" $ dynText $ ffor cnt $ ("cnt : " <>) . T.pack . show
-
-    -- reload
-    --performEvent_ $ ffor (updated cnt) $ \c -> liftIO $ print c >> hFlush stdout
-
-    btn <- button "reload"
-    performEvent_ $ ffor btn $ \c -> reloadPage
-
+    text " "
     -- elapse
     now <- liftIO $ getCurrentTime
     sec1s <- tickLossy (fromIntegral 1) now
 
     secCnt <- foldDyn (const (+ 1)) 0 sec1s
 
-    {-
-    let secCntList = ffor secCnt (\x -> let a = x `mod` 5
-                                            b = [0..]
-                                            c = replicate a secCnt
-                                            f x y = el "p" (display $ fmap (+ x) y)
-                                            d = zipWith f b c
-                                        in sequence_ d)
-    dyn secCntList
-    -}
-    el "p" $ dynText $ ffor secCnt $ ("elapse: " <>) . T.pack . show
+    dynText $ ffor secCnt $ ("elapse: " <>) . T.pack . show
 
 main :: IO ()
 main = mainWidget $ do
