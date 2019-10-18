@@ -135,6 +135,8 @@ rtcWidget ::
      , MonadSample t (Performable m)
      ) => m ()
 rtcWidget = mdo
+  elAttr "p" ("style" =: "color:blue;") $ text "set local peer ID"
+
   let lpTxtAttr = (boolEnable . (== MqttClosed)) <$> join (_rtc_mqtt_state <$> rtcManager_d)
   lpTxt <- textInput $ TextInputConfig "" "" never lpTxtAttr
 
@@ -142,6 +144,7 @@ rtcWidget = mdo
                                     (_textInput_value lpTxt)
                                     (join $ _rtc_mqtt_state <$> rtcManager_d)
 
+  text " "
   (lpBtn, _) <- elDynAttr' "button" lpBtnAttr (text "set local peer")
 
   let rtcManagerInit_e = ffor (tag (current $ _textInput_value lpTxt)
@@ -150,9 +153,10 @@ rtcWidget = mdo
 
   rtcManager_d <- widgetHold (return rtcManagerDummy) rtcManagerInit_e
 
-  el "br" blank
-  display $ join $ _rtc_mqtt_state <$> rtcManager_d
-  el "p" $ text "--"
+  el "p" $ do text "signal server state: "
+              dynText $ fmap (T.pack . show) $ join $ _rtc_mqtt_state <$> rtcManager_d
+
+  elAttr "p" ("style" =: "color:blue;") $ text "connect to another peer"
 
   let rpTxtAttr = (boolEnable . (== MqttReady)) <$> join (_rtc_mqtt_state <$> rtcManager_d)
   rpTxt <- textInput $ TextInputConfig "" "" never rpTxtAttr
@@ -164,18 +168,22 @@ rtcWidget = mdo
                                         (_textInput_value lpTxt))
                                 (join $ _rtc_mqtt_state <$> rtcManager_d)
 
+  text " "
   (rpBtn, _) <- elDynAttr' "button" rpBtnAttr $ text "connect peer"
 
-
+  elAttr "p" ("style" =: "color:blue;") $ text "send message to any connected peer"
 
   let rpE = tag (current $ _textInput_value rpTxt) (domEvent Click rpBtn)
 
   let state_dyn = join $ _rtc_peer_state <$> rtcManager_d
 
   -- Map Text Text
-  msgTxt <- el "p" $ textInput $ TextInputConfig "" "" never (constDyn M.empty)
+  msgTA <- el "div" $ do el "p" $ text "send message: "
+                         textArea $ TextAreaConfig "" never
+                                                   (constDyn $ ("cols" =: "60") <>
+                                                               ("rows" =: "10"))
 
-  txMsgE <- genList state_dyn (_textInput_value msgTxt)
+  txMsgE <- genList state_dyn (_textArea_value msgTA)
 
   rxMsg_e <- switchHold never $ updated $ _rtc_rx_msg <$> rtcManager_d
   performEvent_ $ ffor rxMsg_e $ \m -> DOM.liftJSM $ consoleLog m
@@ -207,12 +215,13 @@ genList m_dyn txt_dyn = do
                                 let e2 = fmap (\(x,y) -> (y,x)) e1 -- Event t (Text, Text)
                                 return e2
 
-              e <- elAttr "table" ("style" := "") $ do
+              e <- elAttr "table" ("border" =: "1" <>
+                                   "style" =: "border: 1px;") $ do
                            el "tr" $ do el "th" $ text "remote peer"
                                         el "th" $ text "state"
                                         el "th" $ text "send message"
-
-                           let a = (fmap leftmost . mapM f) <$> (M.toList <$> m_dyn) -- Dynamic t (m (Event t (Text, Text)))
+                           -- Dynamic t (m (Event t (Text, Text)))
+                           let a = (fmap leftmost . mapM f) <$> (M.toList <$> m_dyn)
                            b <- dyn a -- Event t (Event t (Text, Text))
                            c <- switchHold never b -- Event t (Text, Text)
                            return c
