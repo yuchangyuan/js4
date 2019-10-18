@@ -9,7 +9,6 @@
 module Main where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (forever)
 
 import Crypto.ECC.Ed25519.Sign
 import qualified Data.ByteString.Char8 as B
@@ -30,7 +29,6 @@ import Control.Lens ((^.))
 import Control.Concurrent.MVar
 import Data.Time(getCurrentTime)
 import qualified System.IO as IO
-import Control.Monad ( when )
 
 import qualified GHCJS.DOM as DOM
 import qualified GHCJS.DOM.Types as DOM
@@ -43,11 +41,15 @@ import qualified GHCJS.DOM.EventTarget as DOM
 import qualified GHCJS.DOM.EventM as DOM
 import qualified GHCJS.DOM.GlobalEventHandlers as DOM
 
+import Control.Monad (forever, when, join)
 import Control.Monad.IO.Class (liftIO, MonadIO(..))
+
 import qualified Data.Text as T
+import Data.Text (Text(..))
 
 import System.IO (hFlush, stdout)
 import qualified Data.Map as M
+import Data.Map (Map(..))
 
        {-
 
@@ -63,7 +65,7 @@ import Reflex.Dom.Location (getLocationPath, getLocationAfterHost)
 import Control.Monad.Fix (MonadFix)
 
 import Control.Lens
-
+import Control.Monad.Catch (MonadCatch, catch) -- JSM is MonadCatch
 import RTC
 {-
 1. update mouse position
@@ -114,6 +116,109 @@ clickEv = do
    return ev
 
 
+boolEnable :: Bool -> Map Text Text
+boolEnable x = if x then M.empty else "disabled" =: "disabled"
+
+rtcWidget ::
+     ( DomBuilder t m
+     , DomBuilderSpace m ~ GhcjsDomSpace
+     , MonadHold t m
+     , PerformEvent t m
+     , TriggerEvent t m
+     , Prerender js t m
+     , MonadFix m
+     , Reflex t
+     , PostBuild t m
+     , DOM.MonadJSM m
+     , PerformEvent t m
+     , MonadIO (Performable m)
+     , MonadSample t (Performable m)
+     ) => m ()
+rtcWidget = mdo
+  let lpTxtAttr = (boolEnable . (== MqttClosed)) <$> join (_rtc_mqtt_state <$> rtcManager_d)
+  lpTxt <- textInput $ TextInputConfig "" "" never lpTxtAttr
+
+  let lpBtnAttr = zipDynWith (\a b -> boolEnable $ (a /= T.empty) && (b == MqttClosed))
+                                    (_textInput_value lpTxt)
+                                    (join $ _rtc_mqtt_state <$> rtcManager_d)
+
+  (lpBtn, _) <- elDynAttr' "button" lpBtnAttr (text "set local peer")
+
+  let rtcManagerInit_e = ffor (tag (current $ _textInput_value lpTxt)
+                                   (domEvent Click lpBtn)) $
+                         \lp -> rtcManagerNew lp rpE txMsgE
+
+  rtcManager_d <- widgetHold (return rtcManagerDummy) rtcManagerInit_e
+
+  el "br" blank
+  display $ join $ _rtc_mqtt_state <$> rtcManager_d
+  el "p" $ text "--"
+
+  let rpTxtAttr = (boolEnable . (== MqttReady)) <$> join (_rtc_mqtt_state <$> rtcManager_d)
+  rpTxt <- textInput $ TextInputConfig "" "" never rpTxtAttr
+
+  let rpBtnAttr = zipDynWith (\(a,a1) b ->  boolEnable $ (a /= T.empty) &&
+                                                         (a /= a1) &&
+                                                         (b == MqttReady))
+                                (zipDyn (_textInput_value rpTxt)
+                                        (_textInput_value lpTxt))
+                                (join $ _rtc_mqtt_state <$> rtcManager_d)
+
+  (rpBtn, _) <- elDynAttr' "button" rpBtnAttr $ text "connect peer"
+
+
+
+  let rpE = tag (current $ _textInput_value rpTxt) (domEvent Click rpBtn)
+
+  let state_dyn = join $ _rtc_peer_state <$> rtcManager_d
+
+  -- Map Text Text
+  msgTxt <- el "p" $ textInput $ TextInputConfig "" "" never (constDyn M.empty)
+
+  txMsgE <- genList state_dyn (_textInput_value msgTxt)
+
+  rxMsg_e <- switchHold never $ updated $ _rtc_rx_msg <$> rtcManager_d
+  performEvent_ $ ffor rxMsg_e $ \m -> DOM.liftJSM $ consoleLog m
+
+  return ()
+
+genEntry :: ( DomBuilder t m
+            , Reflex t
+            ) =>
+            Text -> Text ->
+            m (Event t Text) -- peerid
+genEntry peer state = do
+   el "tr" $ do el "td" $ text peer
+                el "td" $ text state
+                e <- el "td" $ button $ T.concat [T.pack "send to ", peer]
+                return $ fmap (const peer) $ traceEvent "btn s " e
+
+genList :: ( DomBuilder t m
+           , Reflex t
+           , PostBuild t m
+           , MonadHold t m
+           ) =>
+           Dynamic t (Map Text Text) ->
+           Dynamic t Text ->
+           m (Event t (Text, Text)) -- m (Event t (peerid, text))
+genList m_dyn txt_dyn = do
+              let f (k, v) = do e0 <- genEntry k v
+                                let e1 = attach (current txt_dyn) e0
+                                let e2 = fmap (\(x,y) -> (y,x)) e1 -- Event t (Text, Text)
+                                return e2
+
+              e <- elAttr "table" ("style" := "") $ do
+                           el "tr" $ do el "th" $ text "remote peer"
+                                        el "th" $ text "state"
+                                        el "th" $ text "send message"
+
+                           let a = (fmap leftmost . mapM f) <$> (M.toList <$> m_dyn) -- Dynamic t (m (Event t (Text, Text)))
+                           b <- dyn a -- Event t (Event t (Text, Text))
+                           c <- switchHold never b -- Event t (Text, Text)
+                           return c
+
+              return $ traceEvent "ev list" e
+
 app
   :: ( DomBuilder t m
      , DomBuilderSpace m ~ GhcjsDomSpace
@@ -134,46 +239,8 @@ app = do
     el "p" $ text loc1
     el "p" $ text loc2
 
-    rec lidTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
-        --lidBtn <- button "start"
-
-        let lidBtnAttr = zipDynWith (\a b -> if (a /= T.empty) && (b == MqttClosed)
-                                             then M.empty
-                                             else "disabled" =: "disabled")
-                                   (_textInput_value lidTxt)
-                                   (_mqtt_state mqtt)
-
-        (lidBtn, _) <- elDynAttr' "button" lidBtnAttr (text "set local peer")
-
-        el "br" blank
-        display $ _mqtt_state mqtt
-        el "p" $ text "--"
-
-        mqtt <- mqttWidget (tag (current $ _textInput_value lidTxt)
-                                (domEvent Click lidBtn))
-                           never
-
-
-    ridTxt <- textInput $ TextInputConfig "" "" never (constDyn $ M.empty)
-
-    let ridBtnAttr = zipDynWith (\a b ->  if (a /= T.empty) && (b == MqttReady)
-                                          then M.empty
-                                          else "disabled" =: "disabled")
-                                (_textInput_value ridTxt)
-                                (_mqtt_state mqtt)
-
-
-    (ridBtn, _) <- elDynAttr' "button" ridBtnAttr $ text "connect peer"
-
-    performEvent_ $ ffor (domEvent Click ridBtn) $ \c -> do
-        let t = _textInput_value ridTxt
-        rid <- sample $ current t
-        let t1 = _textInput_value lidTxt
-        lid <- sample $ current t1
-        DOM.liftJSM $ peerConnect (T.unpack lid) (T.unpack rid) Nothing
-        return ()
-
-    -- mouse location
+    rtcWidget
+        -- mouse location
     mEv <- mouseMoveEv
     dynMousePos <- holdDyn "mouse pos: " $ ffor mEv $ ("mouse pos: " <>) . T.pack . show
     el "p" $ dynText dynMousePos
@@ -196,6 +263,15 @@ app = do
 
     secCnt <- foldDyn (const (+ 1)) 0 sec1s
 
+    {-
+    let secCntList = ffor secCnt (\x -> let a = x `mod` 5
+                                            b = [0..]
+                                            c = replicate a secCnt
+                                            f x y = el "p" (display $ fmap (+ x) y)
+                                            d = zipWith f b c
+                                        in sequence_ d)
+    dyn secCntList
+    -}
     el "p" $ dynText $ ffor secCnt $ ("elapse: " <>) . T.pack . show
 
 main :: IO ()

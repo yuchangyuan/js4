@@ -1,9 +1,14 @@
 {-# LANGUAGE ScopedTypeVariables, FlexibleContexts #-}
+{-# Language TupleSections #-}
+{-# Language RecursiveDo #-}
 
-module RTC ( peerConnect
-           , MqttWidget(..)
+module RTC ( MqttWidget(..)
            , mqttWidget
            , MqttState(..)
+           , rtcManagerNew
+           , rtcManagerDummy
+           , RTCManager(..)
+           , consoleLog
            , rtcInit ) where
 
 import qualified GHCJS.DOM as DOM
@@ -12,9 +17,10 @@ import qualified GHCJS.DOM.RTCPeerConnection as DOM
 import qualified GHCJS.DOM.RTCIceCandidateEvent as DOME
 import qualified GHCJS.DOM.RTCDataChannelEvent as DOME
 import qualified GHCJS.DOM.RTCIceCandidate as DOM
-import qualified GHCJS.DOM.RTCDataChannel as DOM
+import qualified GHCJS.DOM.RTCDataChannel as RTCDataChannel
 
 import qualified GHCJS.DOM.EventM as DOM
+import qualified GHCJS.DOM.MessageEvent as DOM
 
 import GHCJS.DOM.EventTargetClosures (unsafeEventName)
 
@@ -37,24 +43,28 @@ import Language.Javascript.JSaddle( askJSM
                                   , new, obj
                                   , (<#)
                                   , maybeNullOrUndefined
-                                  , strToText
+                                  , strToText, textToStr
                                   , valToNumber, valIsNull, valToStr
                                   )
 import Control.Lens ((^.))
-import Control.Monad (when, unless, forM_)
+import Control.Monad (when, unless, forM_, join)
 --import Data.Aeson
 import Data.List (stripPrefix, findIndex)
 import qualified Data.Map as M
+import Data.Map (Map(..))
+import Data.Either (fromLeft, fromRight)
 
 import Control.Monad.IO.Class (liftIO, MonadIO(..))
 
 import qualified Data.Text as T
 import Data.Text (Text(..))
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 
 import Reflex
 import Reflex.Dom.Core
 import Control.Monad.Fix (MonadFix)
+
+import Control.Monad.Catch (MonadCatch, catch)
 
 cfg :: JSM JSVal
 cfg = do
@@ -78,11 +88,6 @@ topicPrefix :: String
 topicPrefix = "WebRTC/测试主题"
 
 -- some hack, use js global variable
-connMap :: JSM JSVal
-connMap = do
-    window <- jsg "window"
-    window ^. js "_conn_map"
-
 rtcInit :: JSM ()
 rtcInit = do
    x <- obj
@@ -100,24 +105,21 @@ parseTopic p s = do
    let e = drop (i1 + 1) c
    return (b, d, e)
 
-
-
-mqttClient :: JSM JSVal
-mqttClient = jsg "window" ^. js "_mqtt_client"
-
-data SignalData = SignalData { signalLocalPeer :: String --- local peer id
-                             , signalRemotePeer :: String -- remote peer id
-                             , signalType :: String -- offer, answer, candidate
+data SignalData = SignalData { signalLocalPeer :: Text --- local peer id
+                             , signalRemotePeer :: Text -- remote peer id
+                             , signalType :: Text -- offer, answer, candidate
                              , signalContent :: Text -- sdp or ice_candidate
                              }
 
-sendSignal :: SignalData -> JSM ()
-sendSignal d = do
-    client <- mqttClient
-    let topic = topicPrefix ++ "/" ++
-                signalRemotePeer d ++ "/" ++
-                signalLocalPeer d ++ "/" ++
-                signalType d
+sendSignal :: JSVal -> SignalData -> JSM ()
+sendSignal client d = do
+    --client <- mqttClient
+    let topic = T.intercalate (T.singleton '/')
+                              [ T.pack topicPrefix
+                              , signalRemotePeer d
+                              , signalLocalPeer d
+                              , signalType d
+                              ]
     let content = signalContent d
 
     paho <- jsg "Paho"
@@ -128,88 +130,9 @@ sendSignal d = do
 
     return ()
 
-procSignal :: SignalData -> JSM ()
-procSignal d = do
-   let c = signalContent d
-   let remotePeer = signalRemotePeer d
-   let localPeer = signalLocalPeer d
-
-   -- connection data
-   cd <- connMap ^. js remotePeer >>= maybeNullOrUndefined
-
-   case (signalType d, cd) of
-      ("offer"     , _)       -> procSignalOffer localPeer remotePeer c
-      (_           , Nothing) -> return ()
-      ("answer"    , Just _)  -> procSignalAnswer remotePeer c
-      ("candidate" , Just _)  -> procSignalCandidate remotePeer c
-      _ -> return ()
-
-procSignalOffer :: String -> String -> Text -> JSM ()
-procSignalOffer localPeer remotePeer sdp = do
-    peerConnect localPeer remotePeer (Just sdp)
-
-procSignalAnswer :: String -> Text -> JSM ()
-procSignalAnswer peer sdp = do
-   -- check
-   pc <- connMap ^. js peer ^. js "pc" >>= fromJSValUnchecked
-
-   sdp' <- jsg "JSON" ^. js1 "parse" sdp
-   DOM.setRemoteDescription pc $ DOM.RTCSessionDescriptionInit sdp'
-
-   return ()
-
-
-procSignalCandidate :: String -> Text -> JSM ()
-procSignalCandidate peer cand = do
-  pc <- (connMap ^. js peer ^. js "pc") >>= fromJSValUnchecked
-
-  cand' <- jsg "JSON" ^. js1 "parse" cand
-  DOM.addIceCandidate pc (DOM.RTCIceCandidate cand')
-
-{-
-mqttStart :: String -> JSM ()
-mqttStart localPeer = do
-  consoleLog ("local_peer: ", localPeer)
-  console <- jsg "console"
-  paho <- jsg "Paho"
-  client <- new (paho ^. js "MQTT" ^. js "Client")
-                ("test.mosquitto.org", 8081 :: Int, "/", "client" ++ localPeer)
-  client ^. jss "onMessageArrived" (fun $ \ _ _ [e] -> do
-            payload <- strToText <$> (e ^. js "payloadString" >>= valToStr)
-            topic <- strToText <$> (e ^. js "topic" >>= valToStr)
-            case parseTopic (topicPrefix ++ "/") (T.unpack topic) of
-                 Just (lid, rid, op) -> do
-                      consoleLog (lid, rid, op, payload)
-                      procSignal (SignalData lid rid op payload)
-                 Nothing -> return ()
-            )
-
-  client ^. jss "onConnected" (fun $ \_ _ [rc, uri] -> do
-      console ^. js1 "log" ("connected:", uri)
-      client ^. js1 "subscribe" (topicPrefix ++ "/" ++ localPeer ++ "/#")
-      return ())
-
-  client ^. jss "onConnectionLost" (fun $ \_ _ [ec, em] -> do
-         console ^. js1 "log" ("lost connection", ec, em)
-         liftIO $ threadDelay $ 2000 * 1000
-         console ^. js1 "log" "reconnect"
-         client ^. js0 "connect"
-
-         return ())
-
-  opts <- obj
-  opts ^. jss "useSSL" True
-  client ^. js1 "connect" opts
-
-
-  window <- jsg "window"
-  window ^.jss "_mqtt_client" client
-
-  return ()
--}
 
 mqttProc :: (MqttState -> IO ()) -> (SignalData -> IO ()) ->
-             String -> JSM JSVal
+             Text -> JSM JSVal
 mqttProc stT msgT localPeer = do
   liftIO $ stT MqttConnecting
 
@@ -217,21 +140,21 @@ mqttProc stT msgT localPeer = do
   console <- jsg "console"
   paho <- jsg "Paho"
   client <- new (paho ^. js "MQTT" ^. js "Client")
-                ("test.mosquitto.org", 8081 :: Int, "/", "client" ++ localPeer)
+                ("test.mosquitto.org", 8081 :: Int, "/", "client" ++ T.unpack localPeer)
   client ^. jss "onMessageArrived" (fun $ \ _ _ [e] -> do
             payload <- strToText <$> (e ^. js "payloadString" >>= valToStr)
             topic <- strToText <$> (e ^. js "topic" >>= valToStr)
             case parseTopic (topicPrefix ++ "/") (T.unpack topic) of
                  Just (lid, rid, op) -> do
-                      let dat = SignalData lid rid op payload
+                      let dat = SignalData (T.pack lid) (T.pack rid) (T.pack op) payload
                       consoleLog (lid, rid, op, payload)
                       liftIO $ msgT dat
                  Nothing -> return ()
             )
 
   client ^. jss "onConnected" (fun $ \_ _ [rc, uri] -> do
-      console ^. js1 "log" ("connected:", uri)
-      client ^. js1 "subscribe" (topicPrefix ++ "/" ++ localPeer ++ "/#")
+      consoleLog ("connected:", uri)
+      client ^. js1 "subscribe" (topicPrefix ++ "/" ++ T.unpack localPeer ++ "/#")
       liftIO $ stT MqttReady
       return ())
 
@@ -240,10 +163,10 @@ mqttProc stT msgT localPeer = do
 
   client ^. jss "onConnectionLost" (fun $ \_ _ [ec, em] -> do
          liftIO $ stT MqttConnecting
-         console ^. js1 "log" ("lost connection", ec, em)
+         consoleLog ("lost connection", ec, em)
 
          liftIO $ threadDelay $ 2000 * 1000
-         console ^. js1 "log" "reconnect"
+         consoleLog "reconnect"
          client ^. js1 "connect" opts
          return ())
 
@@ -261,6 +184,186 @@ data MqttWidget t = MqttWidget { _mqtt_state :: Dynamic t MqttState
                                , _mqtt_message :: Event t SignalData
                                }
 
+data RTCPeerData = RTCPeerData { _rtc_pc :: DOM.RTCPeerConnection
+                               , _rtc_dc :: DOM.RTCDataChannel
+                               }
+type RTCPeerPData = Either DOM.RTCPeerConnection DOM.RTCDataChannel
+
+findPeerPc :: Text -> Map Text RTCPeerData -> Map Text RTCPeerPData ->
+              Maybe DOM.RTCPeerConnection
+findPeerPc peer m1 m2 = let
+  a = m1 M.!? peer
+  b = m2 M.!? peer
+  c = join $ ffor b $ either Just (const Nothing)
+  in if isJust a then _rtc_pc <$> a else c
+
+findPeerDc :: Text -> Map Text RTCPeerData -> Map Text RTCPeerPData ->
+              Maybe DOM.RTCDataChannel
+findPeerDc peer m1 m2 = let
+  a = m1 M.!? peer
+  b = m2 M.!? peer
+  c = join $ ffor b $ either (const Nothing) Just
+  in if isJust a then _rtc_dc <$> a else c
+
+promiseH0 :: (MonadCatch m, DOM.MonadJSM m) => DOM.PromiseRejected -> m (Maybe a)
+promiseH0 e = do
+  DOM.liftJSM $ consoleLog ("promise rejected", DOM.rejectionReason e)
+  return Nothing
+
+procSignalData :: Text ->
+                  Maybe DOM.RTCPeerConnection ->
+                  Maybe DOM.RTCDataChannel ->
+                  (SignalData -> JSM()) ->
+                  (Text -> DOM.RTCDataChannel -> JSM()) ->
+                  (Text -> DOM.RTCPeerConnection -> JSM()) ->
+                  SignalData ->
+                  JSM ()
+procSignalData lp pc' dc' sendSignalFunc insertDCFunc insertPCFunc sd = do
+  let tp = signalType sd
+  let rp = signalRemotePeer sd
+  let c  = signalContent sd
+
+  -- TODO, parse may fail
+  payload <- jsg "JSON" ^. js1 "parse" c
+
+  case (T.unpack tp, pc') of
+    ("offer", _) -> catch (do -- here, we ignore pc'
+      pc <- connectPeer lp rp (Just payload) sendSignalFunc insertDCFunc
+      liftIO $ insertPCFunc rp pc
+      return ()
+      ) (fmap (const ()) . promiseH0)
+    ("candidate", Just pc) ->
+      catch (DOM.addIceCandidate pc (DOM.RTCIceCandidate payload))
+            (fmap (const ()) . promiseH0)
+    ("answer", Just pc) ->
+      catch (DOM.setRemoteDescription pc (DOM.RTCSessionDescriptionInit payload))
+            (fmap (const ()) . promiseH0)
+    _ -> return ()
+
+-- (Text, Just xx) --> insert pc or dc
+-- (Text, Nothing) --> remote pc/dc from peerDataMap
+peerPDataFold :: (Text, Maybe RTCPeerPData) ->
+                 (Map Text RTCPeerPData, Map Text RTCPeerData) ->
+                 (Map Text RTCPeerPData, Map Text RTCPeerData)
+peerPDataFold (peer, Nothing) (m1, m2) = (m1, M.delete peer m2)
+peerPDataFold (peer, Just ppd) (m1, m2) =
+  case (m1 M.!? peer, ppd) of
+    (Nothing, _) ->
+          (M.insert peer ppd m1, m2)
+    (Just (Left _), Left _) ->
+          (M.insert peer ppd m1, m2)
+    (Just (Right _), Right _) ->
+          (M.insert peer ppd m1, m2)
+
+    (Just (Left pc),  Right dc) ->
+          (M.delete peer m1, M.insert peer (RTCPeerData pc dc) m2)
+    (Just (Right dc), Left pc) ->
+          (M.delete peer m1, M.insert peer (RTCPeerData pc dc) m2)
+
+pStFold :: (Text, Maybe Text) -> Map Text Text -> Map Text Text
+pStFold (peer, Nothing) = M.delete peer
+pStFold (peer, Just st) = M.insert peer st
+
+data RTCManager t = RTCManager { _rtc_mqtt_state :: Dynamic t MqttState
+                               , _rtc_peer_state :: Dynamic t (Map Text Text)
+                               , _rtc_rx_msg :: Event t (Text, JSVal)
+                               }
+
+rtcManagerDummy :: (Reflex t) => RTCManager t
+rtcManagerDummy = RTCManager (constDyn MqttClosed) (constDyn M.empty) never
+
+rtcManagerNew :: ( Reflex t
+              , MonadSample t m
+              , MonadSample t (Performable m)
+              , MonadFix m
+              , DOM.MonadJSM m
+              , MonadHold t m
+              , PerformEvent t m
+              , TriggerEvent t m
+              , MonadIO (Performable m)
+              ) =>
+              Text -> -- local peer id
+              Event t Text -> -- request remote peer id
+              Event t (Text, Text) -> -- msgId, peerId, payload
+              m (RTCManager t)
+rtcManagerNew lp rpE txMsgE = mdo
+  (txSdE, txSdT) <- newTriggerEvent
+  mqtt <- mqttWidget lp txSdE
+
+  (peerPDataE, peerPDataT) <- newTriggerEvent -- (peer, RTCPData)
+
+  -- peerPMapE :: (Text, RTCPeerPData)
+  (peerPDataMapD, peerDataMapD) <-
+    splitDynPure <$> foldDyn peerPDataFold (M.empty, M.empty) peerPDataE
+
+  (rxMsgE, rxMsgT) <- newTriggerEvent
+  (pStE, pStT) <- newTriggerEvent -- use fold
+
+  -- Text, Maybe Text
+  pStD <- foldDyn pStFold M.empty pStE
+
+  -- TODO, check pStD for "disconnected", and manual call pStT to remove
+  -- and call peerPDataT to remove from peerDataMapD
+  -- and call close to these data
+  -- performEvent_
+
+  performEvent_ $ ffor txMsgE $ \(rp, msg) -> do
+     pm <- sample $ current peerDataMapD
+
+     case pm M.!? rp of
+       Just (RTCPeerData _ dc) -> do
+          -- TODO, use send
+          DOM.liftJSM $ RTCDataChannel.sendString dc msg
+       Nothing ->
+          return ()
+
+
+  let sendSignalFunc = liftIO . txSdT
+  let insertDCFunc rp dc = do
+       -- add call back for rxMsgT
+       DOM.on dc RTCDataChannel.open $ do
+         liftIO $ pStT (rp, Just $ T.pack "open")
+
+       DOM.on dc RTCDataChannel.message $ do
+         ev <- DOM.event
+         dat <- DOM.getData ev
+         liftIO $ rxMsgT (rp, dat)
+
+       DOM.on dc RTCDataChannel.error $ do
+         liftIO $ pStT (rp, Just $ T.pack "error")
+
+       DOM.on dc RTCDataChannel.closeEvent $ do
+         liftIO $ pStT (rp, Just $ T.pack "close")
+
+       liftIO $ peerPDataT $ (rp, Just $ Right dc)
+
+  -- TODO, check pc exist, and close exist pc
+  -- or ignore is current pc is OK ??
+  let insertPCFunc rp x = do
+       liftIO $ peerPDataT $ (rp, Just $ Left x)
+
+  performEvent_ $ ffor (_mqtt_message mqtt) $ \sd -> do
+     pm <- sample $ current peerDataMapD
+     pm1 <- sample $ current peerPDataMapD
+
+     let rp = signalRemotePeer sd
+
+     let pc' = findPeerPc rp pm pm1
+     let dc' = findPeerDc rp pm pm1
+
+     DOM.liftJSM $ procSignalData lp
+                                  pc' dc'
+                                  sendSignalFunc insertDCFunc insertPCFunc
+                                  sd
+
+  performEvent_ $ ffor rpE $ \rp -> DOM.liftJSM $ do
+     pc' <-  catch (Just <$> connectPeer lp rp Nothing
+                                         sendSignalFunc insertDCFunc)
+                   promiseH0
+     mapM_ (insertPCFunc rp) pc'
+
+  return $ RTCManager (_mqtt_state mqtt) pStD rxMsgE
+
 mqttWidget :: ( Reflex t
               , MonadSample t m
               , DOM.MonadJSM m
@@ -269,29 +372,27 @@ mqttWidget :: ( Reflex t
               , TriggerEvent t m
               , MonadIO (Performable m)
               ) =>
-              Event t Text -> -- local peer id
+              Text -> -- local peer id
               Event t SignalData -> -- send signal data
               m (MqttWidget t)
-
-mqttWidget peer reqE = do
-    peerE <- headE $ T.unpack <$> peer
+mqttWidget lp reqE = do
     (msgE, msgT) <- newTriggerEvent
+
     (stE, stT) <- newTriggerEvent
     stDyn <- holdDyn MqttClosed stE
 
-    mqttClientE <- performEvent $ ffor peerE $
-                \p -> Just <$> DOM.liftJSM (mqttProc stT msgT p)
-    mqttClientB <- hold Nothing mqttClientE
+    client <- DOM.liftJSM (mqttProc stT msgT lp)
 
-    -- use stDyn & mqttClientB to gate reqE
-    --
+    let reqE' = gate ((== MqttReady) <$> current stDyn) reqE
+
+    performEvent $ ffor reqE' $ DOM.liftJSM . sendSignal client
 
     return $ MqttWidget stDyn msgE
 
-initDataChannel :: String -> DOM.RTCDataChannel -> JSM ()
-initDataChannel remotePeer dc = do
-  connMap ^. js remotePeer ^. jss "dc" dc
-
+dbgDataChannel :: Text -> DOM.RTCDataChannel -> JSM ()
+dbgDataChannel remotePeer dc = do
+  --connMap ^. js remotePeer ^. jss "dc" dc
+  {-
   DOM.on dc DOM.message $ do
     e <- DOM.event
     DOM.liftJSM $ consoleLog e
@@ -299,13 +400,19 @@ initDataChannel remotePeer dc = do
   DOM.on dc DOM.open $ do
     e <- DOM.event
     DOM.liftJSM $ consoleLog e
-
+  -}
   return ()
 
-peerConnect :: String -> String -> Maybe Text -> JSM ()
-peerConnect localPeer remotePeer remoteSdp = do
+-- unsafe, need catch PromiseReject exception
+connectPeer :: Text -> Text ->
+               Maybe JSVal ->
+               (SignalData -> JSM()) ->
+               (Text -> DOM.RTCDataChannel -> JSM()) ->
+               JSM DOM.RTCPeerConnection
+connectPeer localPeer remotePeer remoteSdp
+            sendSignalFunc insertDCFunc = do
   pc <- cfg >>= new (jsg "RTCPeerConnection") >>= (return . DOM.RTCPeerConnection)
-  let isOffer = remoteSdp == Nothing
+  let isOffer = isNothing remoteSdp
   -- DOM.getConfiguration pc >>= consoleLog
 
   DOM.on pc DOM.iceCandidate $ do
@@ -314,7 +421,7 @@ peerConnect localPeer remotePeer remoteSdp = do
 
     DOM.liftJSM $ do
       c' <- strToText <$> (jsg "JSON"  ^. js1 "stringify" c >>= valToStr)
-      sendSignal $ SignalData localPeer remotePeer "candidate" c'
+      sendSignalFunc $ SignalData localPeer remotePeer (T.pack "candidate") c'
 
       done <- valIsNull c
       --unless n $ DOM.liftJSM $ do
@@ -331,41 +438,43 @@ peerConnect localPeer remotePeer remoteSdp = do
      dc <- DOME.getChannel e
      DOM.liftJSM $ do
        consoleLog "on data channel"
-       initDataChannel remotePeer dc
+       insertDCFunc remotePeer dc
 
-  -- TODO, check connmap ^. js remotePeer, release when necessary
-  isClean <- connMap ^. js remotePeer >>= valIsNull
-  unless isClean $ return () -- TODO, clean already run connection
-
-  -- save pc & dc
-  dcNew <- obj
-  connMap ^. jss remotePeer dcNew
+  -- save pc & dc, for debug
+  {-
+  objNew <- obj
+  connMap ^. jss remotePeer objNew
   connMap ^. js remotePeer ^. jss "pc" pc
+  -}
 
   -- NOTE: should create dc before offser
-  when isOffer $ do
-    dc <- DOM.createDataChannel pc "ch0" Nothing
-    initDataChannel remotePeer dc
+  dc' <- if isOffer
+        then Just <$> DOM.createDataChannel pc "ch0" Nothing
+        else return Nothing
 
   -- NOTE: should set remote sdp before answer
-  forM_ remoteSdp $ \x -> do
-    -- TODO, do check
-    x1 <- jsg "JSON" ^. js1 "parse" x
-    DOM.setRemoteDescription pc $ DOM.RTCSessionDescriptionInit x1
+  forM_ remoteSdp $ \x -> DOM.setRemoteDescription pc $ DOM.RTCSessionDescriptionInit x
 
-  consoleLog $ connMap ^. js remotePeer
+  --consoleLog $ connMap ^. js remotePeer
 
+  -- TODO, create ans & off is promise
   sdp <- if isJust remoteSdp
          then DOM.createAnswer pc Nothing
          else DOM.createOffer pc Nothing
 
   consoleLog sdp
 
+  --- TODO, this is promise, maybe reject
   DOM.setLocalDescription pc sdp
   sdp' <- strToText <$> (jsg "JSON"  ^. js1 "stringify" sdp >>= valToStr)
 
-  if isJust remoteSdp
-     then sendSignal $ SignalData localPeer remotePeer "answer" sdp'
-     else sendSignal $ SignalData localPeer remotePeer "offer" sdp'
+  -- insert dc, should insert after last function
+  -- which throw PromiseRejected exception
+  mapM_ (insertDCFunc remotePeer) dc'
 
-  return ()
+  let f op = sendSignalFunc $ SignalData localPeer remotePeer (T.pack op) sdp'
+
+  if isJust remoteSdp then f "answer" else f "offer"
+
+
+  return pc

@@ -1,6 +1,6 @@
 { mkDerivation, aeson, base, bytestring, containers, eccrypto
-, ghcjs-base, ghcjs-dom, ghcjs-prim, jsaddle, lens, reflex
-, reflex-dom-core, stdenv, text, time
+, exceptions, ghcjs-base, ghcjs-dom, ghcjs-prim, jsaddle, lens
+, reflex, reflex-dom-core, stdenv, text, time
 }:
 mkDerivation {
   pname = "js4";
@@ -9,8 +9,8 @@ mkDerivation {
   isLibrary = false;
   isExecutable = true;
   executableHaskellDepends = [
-    aeson base bytestring containers eccrypto ghcjs-base ghcjs-dom
-    ghcjs-prim jsaddle lens reflex reflex-dom-core text time
+    aeson base bytestring containers eccrypto exceptions ghcjs-base
+    ghcjs-dom ghcjs-prim jsaddle lens reflex reflex-dom-core text time
   ];
   license = stdenv.lib.licenses.gpl3;
 }
