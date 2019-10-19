@@ -29,7 +29,7 @@ import Control.Concurrent (threadDelay)
 
 import Language.Javascript.JSaddle( askJSM
                                   , JSM(..)
-                                  , JSContextRef
+                                  , JSContextRef, JSException
                                   , syncPoint
                                   , runJSM
                                   , runJSaddle
@@ -126,7 +126,10 @@ sendSignal client d = do
     msg <- new (paho ^. js "MQTT" ^. js "Message") content
     msg ^. jss "destinationName" topic
 
-    client ^.js1 "send" msg
+    catch (client ^. js1 "send" msg >> return ())
+          (\(e :: JSException) -> do consoleLog ("js exception ", T.pack (show e))
+                                     return ()
+          )
 
     return ()
 
@@ -160,14 +163,15 @@ mqttProc stT msgT localPeer = do
 
   opts <- obj
   opts ^. jss "useSSL" True
+  opts ^. jss "reconnect" True
 
   client ^. jss "onConnectionLost" (fun $ \_ _ [ec, em] -> do
          liftIO $ stT MqttConnecting
          consoleLog ("lost connection", ec, em)
 
-         liftIO $ threadDelay $ 2000 * 1000
-         consoleLog "reconnect"
-         client ^. js1 "connect" opts
+         --liftIO $ threadDelay $ 2000 * 1000
+         --consoleLog "reconnect"
+         --client ^. js1 "connect" opts
          return ())
 
   client ^. js1 "connect" opts
