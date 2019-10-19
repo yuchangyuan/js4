@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables, FlexibleContexts #-}
 {-# Language TupleSections #-}
 {-# Language RecursiveDo #-}
+{-# Language BlockArguments #-}
 
 module RTC ( MqttWidget(..)
            , mqttWidget
@@ -21,6 +22,7 @@ import qualified GHCJS.DOM.RTCDataChannel as RTCDataChannel
 
 import qualified GHCJS.DOM.EventM as DOM
 import qualified GHCJS.DOM.MessageEvent as DOM
+import qualified GHCJS.DOM.Enums as Enums
 
 import GHCJS.DOM.EventTargetClosures (unsafeEventName)
 
@@ -249,7 +251,7 @@ procSignalData lp pc' dc' sendSignalFunc insertDCFunc insertPCFunc sd = do
 peerPDataFold :: (Text, Maybe RTCPeerPData) ->
                  (Map Text RTCPeerPData, Map Text RTCPeerData) ->
                  (Map Text RTCPeerPData, Map Text RTCPeerData)
-peerPDataFold (peer, Nothing) (m1, m2) = (m1, M.delete peer m2)
+peerPDataFold (peer, Nothing) (m1, m2) = (M.delete peer m1, M.delete peer m2)
 peerPDataFold (peer, Just ppd) (m1, m2) =
   case (m1 M.!? peer, ppd) of
     (Nothing, _) ->
@@ -306,10 +308,31 @@ rtcManagerNew lp rpE txMsgE = mdo
   -- Text, Maybe Text
   pStD <- foldDyn pStFold M.empty pStE
 
-  -- TODO, check pStD for "disconnected", and manual call pStT to remove
-  -- and call peerPDataT to remove from peerDataMapD
-  -- and call close to these data
-  -- performEvent_
+  let stNeedClean x = (x == Just (T.pack "closed")) ||
+                      (x == Just (T.pack "disconnected")) ||
+                      (x == Just (T.pack "failed"))
+
+  -- use pStE to check "disconnected" or "closed" event
+  -- find pc in peerPDataMapD & peerDataMapD
+  -- close this pc
+  -- send (peer, Nothing) event to pStE & peerPDataE, to clean then in there dynamic
+
+  performEvent_ $ ffor pStE $ \(rp, st) ->
+                if stNeedClean st
+                then do pm  <- sample $ current peerDataMapD
+                        pm1 <- sample $ current peerPDataMapD
+
+                        let pc' = findPeerPc rp pm pm1
+
+                        mapM_ DOM.close pc'
+
+                        liftIO $ pStT (rp, Nothing)
+                        liftIO $ peerPDataT (rp, Nothing)
+                else return ()
+
+
+  -- TODO, scan prepared 'pc' periodically, remove then after some time
+
 
   performEvent_ $ ffor txMsgE $ \(rp, msg) -> do
      pm <- sample $ current peerDataMapD
@@ -337,13 +360,14 @@ rtcManagerNew lp rpE txMsgE = mdo
          liftIO $ pStT (rp, Just $ T.pack "error")
 
        DOM.on dc RTCDataChannel.closeEvent $ do
-         liftIO $ pStT (rp, Just $ T.pack "close")
+         liftIO $ pStT (rp, Just $ T.pack "closed")
 
        liftIO $ peerPDataT $ (rp, Just $ Right dc)
 
   -- TODO, check pc exist, and close exist pc
   -- or ignore is current pc is OK ??
   let insertPCFunc rp x = do
+       liftIO $ pStT (rp, Just $ T.pack "prepare")
        liftIO $ peerPDataT $ (rp, Just $ Left x)
 
   performEvent_ $ ffor (_mqtt_message mqtt) $ \sd -> do
