@@ -67,6 +67,7 @@ import Reflex.Dom.Core
 import Control.Monad.Fix (MonadFix)
 
 import Control.Monad.Catch (MonadCatch, catch)
+import Control.Exception (SomeException)
 
 cfg :: JSM JSVal
 cfg = do
@@ -216,6 +217,16 @@ promiseH0 e = do
   DOM.liftJSM $ consoleLog ("promise rejected", DOM.rejectionReason e)
   return Nothing
 
+jsexceptionH0 :: (MonadCatch m, DOM.MonadJSM m) => JSException -> m (Maybe a)
+jsexceptionH0 e = do
+  DOM.liftJSM $ consoleLog ("js exception", show e)
+  return Nothing
+
+exceptionH0 :: (MonadCatch m, DOM.MonadJSM m) => SomeException -> m (Maybe e)
+exceptionH0 e = do
+  DOM.liftJSM $ consoleLog ("js exception", show e)
+  return Nothing
+
 procSignalData :: Text ->
                   Maybe DOM.RTCPeerConnection ->
                   Maybe DOM.RTCDataChannel ->
@@ -340,7 +351,12 @@ rtcManagerNew lp rpE txMsgE = mdo
      case pm M.!? rp of
        Just (RTCPeerData _ dc) -> do
           -- TODO, use send
-          DOM.liftJSM $ RTCDataChannel.sendString dc msg
+          -- NOTE: use catch not work here, some need manually check state
+          --DOM.liftJSM $ catch (RTCDataChannel.sendString dc msg)
+          --                    (fmap (const ()) . exceptionH0)
+          st <- DOM.liftJSM $ RTCDataChannel.getReadyState dc
+          when (st == Enums.RTCDataChannelStateOpen) $
+               DOM.liftJSM $ RTCDataChannel.sendString dc msg
        Nothing ->
           return ()
 
