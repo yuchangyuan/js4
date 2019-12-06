@@ -54,4 +54,8 @@ pkgs: self: super:
   dependent-sum-template = self.callPackage ./dependent-sum-template.nix {};
 
   monoidal-containers = self.callPackage ./monoidal-containers.nix {};
+
+  # for 19.09
+  witherable = self.callPackage ./witherable_0_3.nix {};  
 }
+
