@@ -57,5 +57,6 @@ pkgs: self: super:
 
   # for 19.09
   witherable = self.callPackage ./witherable_0_3.nix {};  
+  bimap = self.callPackage ./bimap_0_3_3.nix {};
 }
 
