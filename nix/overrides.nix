@@ -3,6 +3,9 @@ pkgs: self: super:
   rank1dynamic = pkgs.haskell.lib.dontCheck super.rank1dynamic;
   QuickCheck = pkgs.haskell.lib.dontCheck super.QuickCheck;
 
+  # avoid test out of mem
+  scientific = pkgs.haskell.lib.dontCheck super.scientific;
+
   # avoid doctest, fail to build on ghcjs
   distributive = pkgs.haskell.lib.dontCheck super.distributive;
   comonad = pkgs.haskell.lib.dontCheck super.comonad;
