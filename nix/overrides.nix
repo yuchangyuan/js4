@@ -8,7 +8,6 @@ pkgs: self: super:
 
   # more test fail, fix for 19.09
   time-compat = pkgs.haskell.lib.dontCheck super.time-compat;
-  temporary = pkgs.haskell.lib.dontCheck super.temporary;
 
   # avoid doctest, fail to build on ghcjs
   distributive = pkgs.haskell.lib.dontCheck super.distributive;
